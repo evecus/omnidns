@@ -12,41 +12,9 @@ use std::time::Instant;
 use tokio::net::{TcpListener, UdpSocket};
 use tracing::{debug, error, warn};
 
-pub async fn serve(
-    addr: SocketAddr,
-    router: Arc<Router>,
-    stats: Option<Arc<StatsCollector>>,
-) -> Result<()> {
-    let udp_router = router.clone();
-    let tcp_router = router.clone();
-    let udp_stats = stats.clone();
-    let tcp_stats = stats.clone();
-
-    let udp_handle = tokio::spawn(async move {
-        if let Err(e) = serve_udp(addr, udp_router, udp_stats).await {
-            error!("UDP listener error: {}", e);
-        }
-    });
-
-    let tcp_handle = tokio::spawn(async move {
-        if let Err(e) = serve_tcp(addr, tcp_router, tcp_stats).await {
-            error!("TCP listener error: {}", e);
-        }
-    });
-
-    tracing::info!("DNS server listening on {}", addr);
-
-    tokio::select! {
-        _ = udp_handle => {}
-        _ = tcp_handle => {}
-    }
-
-    Ok(())
-}
-
-/// 持有 UDP/TCP 两个子任务的句柄，可用于精确 abort（不同于 [`serve`]，后者
-/// 把两个子任务包在一个 `tokio::select!` 里返回单个 future——abort 外层 future
-/// 并不会连带 abort 内部 `tokio::spawn` 出来的子任务，会造成端口泄漏）。
+/// 持有 UDP/TCP 两个子任务的句柄，可用于精确 abort（普通做法是把两个子任务
+/// 包在一个 `tokio::select!` 里返回单个 future——但 abort 外层 future 并不会
+/// 连带 abort 内部 `tokio::spawn` 出来的子任务，会造成端口泄漏）。
 ///
 /// 用于运行时热更新场景（[`crate::runtime::RuntimeHandle`]），需要在切换监听
 /// 地址时确实地关掉旧 socket。
@@ -96,16 +64,6 @@ pub async fn serve_abortable(
     Ok(AbortableDnsListener { udp, tcp })
 }
 
-async fn serve_udp(
-    addr: SocketAddr,
-    router: Arc<Router>,
-    stats: Option<Arc<StatsCollector>>,
-) -> Result<()> {
-    let socket = Arc::new(UdpSocket::bind(addr).await?);
-    tracing::info!("UDP listener on {}", addr);
-    serve_udp_with_socket(socket, router, stats).await
-}
-
 async fn serve_udp_with_socket(
     socket: Arc<UdpSocket>,
     router: Arc<Router>,
@@ -134,16 +92,6 @@ async fn serve_udp_with_socket(
             }
         });
     }
-}
-
-async fn serve_tcp(
-    addr: SocketAddr,
-    router: Arc<Router>,
-    stats: Option<Arc<StatsCollector>>,
-) -> Result<()> {
-    let listener = TcpListener::bind(addr).await?;
-    tracing::info!("TCP listener on {}", addr);
-    serve_tcp_with_listener(listener, router, stats).await
 }
 
 async fn serve_tcp_with_listener(

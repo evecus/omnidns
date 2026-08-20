@@ -5,4 +5,4 @@ pub mod resolver;
 pub mod router;
 pub mod upstream;
 
-pub use listener::{serve, serve_abortable, AbortableDnsListener};
+pub use listener::{serve_abortable, AbortableDnsListener};

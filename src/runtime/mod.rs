@@ -9,10 +9,10 @@
 //!   - DNS 监听 (`listen`)、防火墙 (`firewall`)、DHCP/RA (`dhcp`) 涉及系统资源
 //!     （socket bind / nftables 规则 / raw socket）。这三者都用
 //!     `crate::dns::serve_abortable` / `crate::dhcp::serve_abortable`，返回真正
-//!     可以逐个 abort 子任务的句柄——普通的 `crate::dns::serve` /
-//!     `crate::dhcp::serve` 内部把子任务包进一个 `select!`/`join_all` future，
-//!     abort 外层并不会连带 abort 内部 `tokio::spawn` 出来的子任务，会导致旧
-//!     socket / 网卡监听泄漏，因此热更新路径必须用 abortable 版本。
+//!     可以逐个 abort 子任务的句柄——早期实现中曾把子任务包进一个
+//!     `select!`/`join_all` future 整体返回，但 abort 外层并不会连带 abort
+//!     内部 `tokio::spawn` 出来的子任务，会导致旧 socket / 网卡监听泄漏，
+//!     因此热更新路径必须用这种可精确 abort 子任务的版本。
 //!   - `web.listen` 与 `web.auth.{username,password_hash}`（密码单独走改密码接口）
 //!     不在这里处理：apply() 中会强制沿用旧值并记录进 `ignored`，
 //!     必须手动改配置文件+重启进程才生效，UI 侧标注为只读。
@@ -25,8 +25,8 @@ use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
 use tracing::info;
 
-use crate::config::{Config, FirewallConfig};
-use crate::dhcp::{AbortableDhcpServices, DhcpConfig};
+use crate::config::{Config, DhcpConfig, FirewallConfig};
+use crate::dhcp::AbortableDhcpServices;
 use crate::dns::hosts::DynamicHosts;
 use crate::dns::router::Router;
 use crate::dns::AbortableDnsListener;
