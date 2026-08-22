@@ -1,148 +1,83 @@
-use std::net::SocketAddr;
-use std::sync::Arc;
+//! DNS-over-TLS upstream。
+//!
+//! DoT 上游的 host 可以是 IP 字面量或域名。域名在运行时用 HostResolver
+//! 解析（用 default_nameserver，避免循环依赖），结果缓存复用。
+//!
+//! SNI 用 host 原文：IP 字面量 → IP SAN，域名 → 域名 SNI。
 
-use bytes::Bytes;
+use anyhow::{Context, Result};
+use hickory_proto::op::Message;
+use hickory_proto::serialize::binary::BinDecodable;
+use rustls::pki_types::ServerName;
+use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::TcpStream;
+use tokio::time::timeout;
+use tokio_rustls::TlsConnector;
 use tracing::debug;
 
-use super::util::tcp_framed_exchange;
+use super::resolver::HostResolver;
+use super::util;
 
-pub(super) async fn dot_query_pooled(
-    addr: SocketAddr,
-    sni: &str,
-    tls_cfg: Arc<rustls::ClientConfig>,
-    msg: Bytes,
-    mark: u32,
-    pool: &tokio::sync::Mutex<Option<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>>,
-) -> anyhow::Result<Bytes> {
-    let mut last_err: Option<anyhow::Error> = None;
-    for attempt in 0..2 {
-        // 1. 取出或建立连接
-        let (mut tls, created) = acquire_or_dial(addr, sni, tls_cfg.clone(), mark, pool).await?;
+const DOT_TIMEOUT: Duration = Duration::from_secs(5);
 
-        // 2. 在连接上做 framed 交换
-        match tcp_framed_exchange(&mut tls, msg.clone()).await {
-            Ok(resp) => {
-                // 成功则归还连接
-                *pool.lock().await = Some(tls);
-                return Ok(resp);
+/// 复用的 TLS 连接（take/put 模式）。
+pub type PooledTlsConn = tokio_rustls::client::TlsStream<TcpStream>;
+
+pub async fn query(
+    host: &str,
+    port: u16,
+    insecure: bool,
+    request: &Message,
+    pool: &Arc<tokio::sync::Mutex<Option<PooledTlsConn>>>,
+    resolver: &HostResolver,
+) -> Result<Message> {
+    let wire = request.to_vec()?;
+    let cfg = util::build_rustls_client_config(insecure)?;
+    let connector = TlsConnector::from(cfg);
+
+    // SNI 用 host 原文（IP 字面量 → IpAddress，域名 → DNS name）
+    let server_name: ServerName<'static> = if let Ok(std_ip) = host.parse::<std::net::IpAddr>() {
+        let ip: rustls::pki_types::IpAddr = std_ip.into();
+        ServerName::IpAddress(ip)
+    } else {
+        ServerName::try_from(host.to_string())
+            .map_err(|e| anyhow::anyhow!("invalid SNI '{}': {}", host, e))?
+    };
+
+    // 先尝试用池里的连接
+    if let Some(mut conn) = pool.lock().await.take() {
+        match timeout(DOT_TIMEOUT, util::tcp_framed_exchange(&mut conn, &wire)).await {
+            Ok(Ok(resp_bytes)) => {
+                let mut guard = pool.lock().await;
+                *guard = Some(conn);
+                return Message::from_bytes(&resp_bytes)
+                    .context("Failed to parse DoT DNS response");
             }
-            Err(e) => {
-                debug!(
-                    addr=%addr,
-                    attempt,
-                    created,
-                    err=%e,
-                    "DoT pooled exchange failed, dropping connection"
-                );
-                // 失败则丢弃连接（不归还）
-                last_err = Some(e);
-                if created {
-                    // 新建连接就失败：重试也没用
-                    return Err(last_err.unwrap());
-                }
-                // 复用旧连接失败：清空 pool（pool 已经空了，但显式声明）后重试
-                continue;
-            }
+            Ok(Err(e)) => debug!("DoT pooled conn failed, will rebuild: {}", e),
+            Err(_) => debug!("DoT pooled conn timed out, will rebuild"),
         }
     }
-    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("DoT query exhausted retries")))
-}
 
-/// 从 pool 取出连接，如无则新建。
-/// 返回 (tls_stream, created)：created=true 表示是新建的连接。
-async fn acquire_or_dial(
-    addr: SocketAddr,
-    sni: &str,
-    tls_cfg: Arc<rustls::ClientConfig>,
-    mark: u32,
-    pool: &tokio::sync::Mutex<Option<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>>,
-) -> anyhow::Result<(tokio_rustls::client::TlsStream<tokio::net::TcpStream>, bool)> {
-    // 先尝试从 pool 取
-    let pooled = pool.lock().await.take();
-    if let Some(tls) = pooled {
-        return Ok((tls, false));
-    }
-    // pool 为空：新建
-    let tcp = TcpStream::connect(addr)
-        .await
-        .map_err(|e| anyhow::anyhow!("DoT TCP connect to {addr} failed: {e}"))?;
-    crate::outbound::apply_mark_to_tcp(&tcp, mark)?;
-    let tls = crate::outbound::tls::connect_tls(tcp, sni, tls_cfg)
-        .await
-        .map_err(|e| anyhow::anyhow!("DoT TLS handshake with {sni} failed: {e}"))?;
-    Ok((tls, true))
-}
+    // 运行时解析域名为 SocketAddr（lazy + 缓存）
+    let addr = resolver.resolve_socket_addr(host, port).await?;
 
-pub(super) async fn dot_query_via_detour(
-    outbound: &dyn crate::outbound::Outbound,
-    host: String,
-    port: u16,
-    sni: &str,
-    tls_cfg: Arc<rustls::ClientConfig>,
-    msg: Bytes,
-) -> anyhow::Result<Bytes> {
-    // 先通过 detour 建立 TCP 隧道，再在上面套 TLS
-    let tcp_stream = outbound.connect_tcp(&host, port).await?;
-    // connect_tcp 返回 Box<dyn AsyncReadWrite>，需要转为 TcpStream-like
-    // 这里利用 tokio-rustls 支持任意 AsyncRead+AsyncWrite 的能力
-    let tls = dot_tls_on_boxed(tcp_stream, sni, tls_cfg).await?;
-    // tls 实现了 AsyncRead+AsyncWrite，可直接用
-    let mut tls = tls;
-    tcp_framed_exchange(&mut tls, msg).await
-}
+    // 建立新连接并查询
+    let (resp_bytes, conn) = timeout(DOT_TIMEOUT, async {
+        let tcp = TcpStream::connect(addr).await.context("DoT TCP connect failed")?;
+        let mut tls = connector
+            .connect(server_name, tcp)
+            .await
+            .context("DoT TLS handshake failed")?;
+        let resp_bytes = util::tcp_framed_exchange(&mut tls, &wire).await?;
+        Ok::<_, anyhow::Error>((resp_bytes, tls))
+    })
+    .await
+    .context("DoT exchange timed out")??;
 
-pub(super) async fn dot_tls_on_boxed(
-    stream: Box<dyn crate::outbound::AsyncReadWrite>,
-    sni: &str,
-    tls_cfg: Arc<rustls::ClientConfig>,
-) -> anyhow::Result<tokio_rustls::client::TlsStream<BoxStream>> {
-    use rustls::pki_types::ServerName;
-    use tokio_rustls::TlsConnector;
+    // 放回池供下次复用
+    let mut guard = pool.lock().await;
+    *guard = Some(conn);
 
-    let connector = TlsConnector::from(tls_cfg);
-    let server_name =
-        ServerName::try_from(sni.to_string()).map_err(|_| anyhow::anyhow!("invalid SNI: {sni}"))?;
-    let tls = connector
-        .connect(server_name, BoxStream(stream))
-        .await
-        .map_err(|e| anyhow::anyhow!("DoT TLS handshake via detour with {sni} failed: {e}"))?;
-    Ok(tls)
-}
-
-// 将 Box<dyn AsyncReadWrite> 包装成实现 AsyncRead+AsyncWrite 的新类型，
-// 供 tokio-rustls 使用。
-// 标记 pub(super) 以便 dot_tls_on_boxed 的返回类型可被同模块树（如 doh.rs）使用。
-pub(super) struct BoxStream(pub(super) Box<dyn crate::outbound::AsyncReadWrite>);
-
-impl tokio::io::AsyncRead for BoxStream {
-    fn poll_read(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        std::pin::Pin::new(&mut *self.0).poll_read(cx, buf)
-    }
-}
-
-impl tokio::io::AsyncWrite for BoxStream {
-    fn poll_write(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &[u8],
-    ) -> std::task::Poll<std::io::Result<usize>> {
-        std::pin::Pin::new(&mut *self.0).poll_write(cx, buf)
-    }
-    fn poll_flush(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        std::pin::Pin::new(&mut *self.0).poll_flush(cx)
-    }
-    fn poll_shutdown(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        std::pin::Pin::new(&mut *self.0).poll_shutdown(cx)
-    }
+    Message::from_bytes(&resp_bytes).context("Failed to parse DoT DNS response")
 }
