@@ -65,6 +65,12 @@ export function KeyValueEditor({ entries = {}, onChange, keyPlaceholder = 'key',
 
 // 通用"对象数组"编辑器，columns 定义每列的 key/placeholder/type。
 // 用于 rulesets（path, upstream）、static-leases（mac, ip, hostname）等。
+//
+// 移动端适配：桌面端（sm 及以上）沿用原来的等宽 grid 表格布局；
+// 小屏幕下每一行会挤压成没法输入的窄条（比如静态租约是 3 列 + 删除按钮，
+// 375px 宽的手机上每个输入框不到 80px，placeholder 都放不下），所以
+// 移动端改为每行一张卡片，每个字段带上自己的 label 竖排列出，删除按钮
+// 放在卡片右上角，保证任何列数下都可用。
 export function ObjectListEditor({ items = [], onChange, columns, addLabel = '添加' }) {
   const setField = (i, key, value) => {
     const next = items.map((item, idx) => (idx === i ? { ...item, [key]: value } : item))
@@ -76,26 +82,44 @@ export function ObjectListEditor({ items = [], onChange, columns, addLabel = '�
     onChange([...items, blank])
   }
 
+  // 桌面端 grid 的列宽用 CSS 变量传入，配合下方 <style> 里的媒体查询生效；
+  // 移动端（<640px）该媒体查询不生效，容器退回 flex 竖排卡片布局。
+  const desktopGridStyle = { '--obj-list-cols': `repeat(${columns.length}, 1fr) 32px` }
+
   return (
     <div className="space-y-2">
+      {/* 桌面端表头，移动端隐藏（卡片布局下每个字段自带 label） */}
       {items.length > 0 && (
-        <div className="hidden sm:grid gap-2 px-0.5" style={{ gridTemplateColumns: `${columns.map(() => '1fr').join(' ')} 32px` }}>
+        <div className="hidden sm:grid gap-2 px-0.5 obj-list-row" style={desktopGridStyle}>
           {columns.map((c) => (
             <div key={c.key} className="text-xs font-medium text-slate-400">{c.label}</div>
           ))}
         </div>
       )}
       {items.map((item, i) => (
-        <div key={i} className="grid gap-2" style={{ gridTemplateColumns: `${columns.map(() => '1fr').join(' ')} 32px` }}>
+        <div
+          key={i}
+          className="flex flex-col gap-2 p-3 rounded-xl border border-slate-100 sm:border-0 sm:p-0 sm:rounded-none sm:grid sm:gap-2 obj-list-row"
+          style={desktopGridStyle}
+        >
+          {/* 移动端：右上角删除按钮 */}
+          <div className="flex justify-end sm:hidden -mt-1 -mr-1">
+            <Button variant="ghost" size="sm" onClick={() => remove(i)} type="button" className="text-rose-500 hover:bg-rose-50">
+              <TrashIcon /> 删除
+            </Button>
+          </div>
           {columns.map((c) => (
-            <Input
-              key={c.key}
-              value={item[c.key] ?? ''}
-              onChange={(e) => setField(i, c.key, e.target.value)}
-              placeholder={c.placeholder}
-            />
+            <div key={c.key} className="sm:contents">
+              <label className="text-xs font-medium text-slate-400 mb-1 block sm:hidden">{c.label}</label>
+              <Input
+                value={item[c.key] ?? ''}
+                onChange={(e) => setField(i, c.key, e.target.value)}
+                placeholder={c.placeholder}
+              />
+            </div>
           ))}
-          <Button variant="ghost" size="sm" onClick={() => remove(i)} className="shrink-0" type="button">
+          {/* 桌面端：行尾删除按钮 */}
+          <Button variant="ghost" size="sm" onClick={() => remove(i)} className="hidden sm:inline-flex shrink-0" type="button">
             <TrashIcon />
           </Button>
         </div>

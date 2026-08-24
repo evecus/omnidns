@@ -43,7 +43,8 @@ export default function Dashboard() {
     return <EmptyState title="加载失败" hint={error} />
   }
 
-  const { stats, upstreams, rules, clients, recent_queries } = data
+  const { stats, upstreams, rules, clients, recent_queries: recentQueriesRaw } = data
+  const recent_queries = recentQueriesRaw || []
 
   const rcodeData = (stats.by_rcode || []).map(([name, value]) => ({ name, value }))
   const upstreamData = upstreams.map(([name, s]) => ({ name, queries: s.queries, latency: Number(s.latency_ema_ms?.toFixed(1) || 0) }))
@@ -121,41 +122,62 @@ export default function Dashboard() {
         {/* 上游表格 */}
         <Card>
           <SectionTitle>上游状态</SectionTitle>
-          <div className="overflow-x-auto -mx-5">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-left text-xs text-slate-400 border-b border-slate-100">
-                  <th className="px-5 py-2 font-medium">名称</th>
-                  <th className="px-5 py-2 font-medium text-right">查询</th>
-                  <th className="px-5 py-2 font-medium text-right">成功率</th>
-                  <th className="px-5 py-2 font-medium text-right">延迟</th>
-                </tr>
-              </thead>
-              <tbody>
-                {upstreams.length === 0 ? (
-                  <tr>
-                    <td colSpan={4} className="px-5 py-6 text-center text-slate-400 text-sm">暂无数据</td>
-                  </tr>
-                ) : (
-                  upstreams.map(([name, s]) => {
-                    const rate = s.queries > 0 ? ((s.success / s.queries) * 100).toFixed(1) : '—'
-                    return (
-                      <tr key={name} className="border-b border-slate-50 last:border-0">
-                        <td className="px-5 py-2.5 font-medium text-slate-700">{name}</td>
-                        <td className="px-5 py-2.5 text-right tabular-nums text-slate-500">{s.queries}</td>
-                        <td className="px-5 py-2.5 text-right">
-                          <Badge tone={rate === '—' ? 'slate' : Number(rate) > 95 ? 'green' : Number(rate) > 80 ? 'amber' : 'red'}>
-                            {rate === '—' ? rate : `${rate}%`}
-                          </Badge>
-                        </td>
-                        <td className="px-5 py-2.5 text-right tabular-nums text-slate-500">{s.latency_ema_ms?.toFixed(1)} ms</td>
-                      </tr>
-                    )
-                  })
-                )}
-              </tbody>
-            </table>
-          </div>
+          {upstreams.length === 0 ? (
+            <EmptyState title="暂无数据" />
+          ) : (
+            <>
+              {/* 桌面端：表格 */}
+              <div className="hidden sm:block overflow-x-auto -mx-5">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="text-left text-xs text-slate-400 border-b border-slate-100">
+                      <th className="px-5 py-2 font-medium">名称</th>
+                      <th className="px-5 py-2 font-medium text-right">查询</th>
+                      <th className="px-5 py-2 font-medium text-right">成功率</th>
+                      <th className="px-5 py-2 font-medium text-right">延迟</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {upstreams.map(([name, s]) => {
+                      const rate = s.queries > 0 ? ((s.success / s.queries) * 100).toFixed(1) : '—'
+                      return (
+                        <tr key={name} className="border-b border-slate-50 last:border-0">
+                          <td className="px-5 py-2.5 font-medium text-slate-700">{name}</td>
+                          <td className="px-5 py-2.5 text-right tabular-nums text-slate-500">{s.queries}</td>
+                          <td className="px-5 py-2.5 text-right">
+                            <Badge tone={rate === '—' ? 'slate' : Number(rate) > 95 ? 'green' : Number(rate) > 80 ? 'amber' : 'red'}>
+                              {rate === '—' ? rate : `${rate}%`}
+                            </Badge>
+                          </td>
+                          <td className="px-5 py-2.5 text-right tabular-nums text-slate-500">{s.latency_ema_ms?.toFixed(1)} ms</td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* 移动端：卡片列表 */}
+              <div className="sm:hidden -mx-5 divide-y divide-slate-50">
+                {upstreams.map(([name, s]) => {
+                  const rate = s.queries > 0 ? ((s.success / s.queries) * 100).toFixed(1) : '—'
+                  return (
+                    <div key={name} className="px-5 py-2.5 flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="font-medium text-slate-700 text-sm truncate">{name}</div>
+                        <div className="text-xs text-slate-400 mt-0.5 tabular-nums">
+                          {s.queries} 次查询 · {s.latency_ema_ms?.toFixed(1)} ms
+                        </div>
+                      </div>
+                      <Badge tone={rate === '—' ? 'slate' : Number(rate) > 95 ? 'green' : Number(rate) > 80 ? 'amber' : 'red'}>
+                        {rate === '—' ? rate : `${rate}%`}
+                      </Badge>
+                    </div>
+                  )
+                })}
+              </div>
+            </>
+          )}
         </Card>
 
         {/* 规则命中 + 客户端 */}
@@ -186,40 +208,59 @@ export default function Dashboard() {
       {/* 最近查询 */}
       <Card>
         <SectionTitle>最近查询</SectionTitle>
-        <div className="overflow-x-auto -mx-5">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="text-left text-xs text-slate-400 border-b border-slate-100">
-                <th className="px-5 py-2 font-medium">时间</th>
-                <th className="px-5 py-2 font-medium">域名</th>
-                <th className="px-5 py-2 font-medium">类型</th>
-                <th className="px-5 py-2 font-medium">来源</th>
-                <th className="px-5 py-2 font-medium">响应码</th>
-                <th className="px-5 py-2 font-medium text-right">延迟</th>
-              </tr>
-            </thead>
-            <tbody>
-              {(recent_queries || []).length === 0 ? (
-                <tr>
-                  <td colSpan={6} className="px-5 py-6 text-center text-slate-400 text-sm">暂无查询记录</td>
-                </tr>
-              ) : (
-                recent_queries.slice(0, 10).map((q) => (
-                  <tr key={q.id} className="border-b border-slate-50 last:border-0 hover:bg-slate-50/60">
-                    <td className="px-5 py-2 text-slate-400 text-xs whitespace-nowrap">{formatTime(q.time)}</td>
-                    <td className="px-5 py-2 font-medium text-slate-700 truncate max-w-[220px]">{q.domain}</td>
-                    <td className="px-5 py-2 text-slate-500">{q.qtype}</td>
-                    <td className="px-5 py-2 text-slate-500">{q.upstream}</td>
-                    <td className="px-5 py-2">
-                      <Badge tone={q.rcode === 'NOERROR' ? 'green' : q.blocked ? 'red' : 'amber'}>{q.rcode}</Badge>
-                    </td>
-                    <td className="px-5 py-2 text-right tabular-nums text-slate-400">{q.latency_ms?.toFixed(1)} ms</td>
+        {(recent_queries || []).length === 0 ? (
+          <EmptyState title="暂无查询记录" />
+        ) : (
+          <>
+            {/* 桌面端：表格 */}
+            <div className="hidden sm:block overflow-x-auto -mx-5">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-left text-xs text-slate-400 border-b border-slate-100">
+                    <th className="px-5 py-2 font-medium">时间</th>
+                    <th className="px-5 py-2 font-medium">域名</th>
+                    <th className="px-5 py-2 font-medium">类型</th>
+                    <th className="px-5 py-2 font-medium">来源</th>
+                    <th className="px-5 py-2 font-medium">响应码</th>
+                    <th className="px-5 py-2 font-medium text-right">延迟</th>
                   </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-        </div>
+                </thead>
+                <tbody>
+                  {recent_queries.slice(0, 10).map((q) => (
+                    <tr key={q.id} className="border-b border-slate-50 last:border-0 hover:bg-slate-50/60">
+                      <td className="px-5 py-2 text-slate-400 text-xs whitespace-nowrap">{formatTime(q.time)}</td>
+                      <td className="px-5 py-2 font-medium text-slate-700 truncate max-w-[220px]">{q.domain}</td>
+                      <td className="px-5 py-2 text-slate-500">{q.qtype}</td>
+                      <td className="px-5 py-2 text-slate-500">{q.upstream}</td>
+                      <td className="px-5 py-2">
+                        <Badge tone={q.rcode === 'NOERROR' ? 'green' : q.blocked ? 'red' : 'amber'}>{q.rcode}</Badge>
+                      </td>
+                      <td className="px-5 py-2 text-right tabular-nums text-slate-400">{q.latency_ms?.toFixed(1)} ms</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            {/* 移动端：卡片列表 */}
+            <div className="sm:hidden -mx-5 divide-y divide-slate-50">
+              {recent_queries.slice(0, 10).map((q) => (
+                <div key={q.id} className="px-5 py-2.5">
+                  <div className="flex items-start justify-between gap-2">
+                    <span className="font-medium text-slate-700 text-sm break-all">{q.domain}</span>
+                    <Badge tone={q.rcode === 'NOERROR' ? 'green' : q.blocked ? 'red' : 'amber'}>{q.rcode}</Badge>
+                  </div>
+                  <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-400">
+                    <span>{formatTime(q.time)}</span>
+                    <span>{q.qtype}</span>
+                    <span>{q.upstream}</span>
+                    <span className="tabular-nums">{q.latency_ms?.toFixed(1)} ms</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
       </Card>
     </div>
   )

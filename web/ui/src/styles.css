@@ -23,4 +23,15 @@
   .scrollbar-thin::-webkit-scrollbar-track {
     background: transparent;
   }
+
+  /* ObjectListEditor（配置页的多列表单，如静态租约 mac/ip/hostname）：
+     桌面端用 grid 表格布局，列数由内联样式变量 --obj-list-cols 指定
+     （每种表单列数不同，无法用固定的 Tailwind 类名表达）。移动端
+     （<640px）不满足该媒体查询，容器退回组件内联 class 里的
+     flex-col 竖排卡片布局，避免多列被压缩到无法输入。 */
+  @media (min-width: 640px) {
+    .obj-list-row {
+      grid-template-columns: var(--obj-list-cols);
+    }
+  }
 }
