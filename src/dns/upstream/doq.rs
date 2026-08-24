@@ -94,7 +94,9 @@ async fn query_with_conn(conn: &Connection, wire: &[u8]) -> Result<Vec<u8>> {
 }
 
 async fn connect(addr: SocketAddr, hostname: &str, insecure: bool) -> Result<Connection> {
-    // 构建 rustls ClientConfig，附加 ALPN=doq
+    // 首次调用时预热证书缓存（阻塞 IO 挪到 spawn_blocking），之后走缓存。
+    util::ensure_tls_config_ready().await;
+    // 构建（缓存命中的）rustls ClientConfig，附加 ALPN=doq
     let cfg = util::build_rustls_client_config(insecure)?;
     let mut rustls_cfg = (*cfg).clone();
     rustls_cfg.alpn_protocols = vec![DOQ_ALPN.to_vec()];

@@ -63,7 +63,7 @@ pub struct UpstreamServer {
     pub url: String,
     pub client_subnet: Option<(std::net::IpAddr, u8)>,
     pub resolver: HostResolver,
-    dot_pool: Arc<tokio::sync::Mutex<Option<dot::PooledTlsConn>>>,
+    dot_pool: Arc<dot::DotPool>,
     doq_pool: Arc<tokio::sync::Mutex<Option<doq::PooledQuicConn>>>,
     doh_client: Arc<tokio::sync::OnceCell<Arc<doh::DohClient>>>,
 }
@@ -90,7 +90,7 @@ impl UpstreamServer {
             url: url.to_string(),
             client_subnet,
             resolver,
-            dot_pool: Arc::new(tokio::sync::Mutex::new(None)),
+            dot_pool: Arc::new(dot::DotPool::new()),
             doq_pool: Arc::new(tokio::sync::Mutex::new(None)),
             doh_client: Arc::new(tokio::sync::OnceCell::new()),
         })
@@ -159,14 +159,8 @@ fn parse_upstream_url(url: &str, insecure: bool) -> Result<UpstreamKind> {
         return Ok(UpstreamKind::Tcp(addr));
     }
     if let Some(rest) = url.strip_prefix("tls://") {
+        // host 可以是 IP 字面量或域名；域名形式在运行时用 HostResolver 解析。
         let (host, port) = util::parse_host_port(rest, 853)?;
-        if host.parse::<std::net::IpAddr>().is_err()
-            && !rest.contains('[')
-            && host.contains('.')
-            && !host.parse::<std::net::Ipv4Addr>().is_ok()
-        {
-            // 域名形式 OK，运行时用 HostResolver 解析
-        }
         return Ok(UpstreamKind::Tls { host, port, insecure });
     }
     if url.starts_with("https://") {

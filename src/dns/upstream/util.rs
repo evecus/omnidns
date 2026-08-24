@@ -287,18 +287,43 @@ fn skip_rr(msg: &[u8], pos: &mut usize) -> Result<()> {
     Ok(())
 }
 
-/// 构建 rustls ClientConfig。
+/// 进程级 rustls ClientConfig 缓存，按 insecure 开关区分两种配置。
+///
+/// 优化点：
+/// - `load_native_certs()` 是阻塞文件系统调用，且证书集合在进程运行期间
+///   不会变化，之前每次 DoT/DoQ 查询都重新加载一遍，既浪费 CPU 又在 async
+///   上下文里做了阻塞 IO。现在只在首次用到某种配置时构建一次，之后复用。
+/// - insecure 和非 insecure 两种配置分别缓存，互不影响。
+static SECURE_TLS_CONFIG: once_cell::sync::OnceCell<Arc<rustls::ClientConfig>> =
+    once_cell::sync::OnceCell::new();
+static INSECURE_TLS_CONFIG: once_cell::sync::OnceCell<Arc<rustls::ClientConfig>> =
+    once_cell::sync::OnceCell::new();
+
+/// 构建（或返回缓存的）rustls ClientConfig。
 /// insecure=true 时使用 NoVerifier 跳过证书验证。
+///
+/// 注意：本函数本身是同步的，但内部证书加载可能涉及阻塞 IO，仅在缓存未命中
+/// 时发生一次。调用方若在 async 上下文中调用，建议首次调用放在
+/// `spawn_blocking` 中预热（见 `warm_up`），避免偶发阻塞 tokio 工作线程。
 pub fn build_rustls_client_config(insecure: bool) -> Result<Arc<rustls::ClientConfig>> {
     use std::sync::Arc as StdArc;
 
     if insecure {
-        // insecure 模式：用 NoVerifier 跳过证书验证
+        if let Some(cfg) = INSECURE_TLS_CONFIG.get() {
+            return Ok(cfg.clone());
+        }
         let cfg = rustls::ClientConfig::builder()
             .dangerous()
             .with_custom_certificate_verifier(StdArc::new(NoVerifier))
             .with_no_client_auth();
-        return Ok(StdArc::new(cfg));
+        let cfg = StdArc::new(cfg);
+        // 多个任务可能并发首次调用，取 set 成功与否都无所谓，谁先谁后返回同一份即可。
+        let _ = INSECURE_TLS_CONFIG.set(cfg.clone());
+        return Ok(INSECURE_TLS_CONFIG.get().cloned().unwrap_or(cfg));
+    }
+
+    if let Some(cfg) = SECURE_TLS_CONFIG.get() {
+        return Ok(cfg.clone());
     }
 
     let mut root_store = rustls::RootCertStore::empty();
@@ -321,7 +346,28 @@ pub fn build_rustls_client_config(insecure: bool) -> Result<Arc<rustls::ClientCo
     let cfg = rustls::ClientConfig::builder()
         .with_root_certificates(root_store)
         .with_no_client_auth();
-    Ok(StdArc::new(cfg))
+    let cfg = StdArc::new(cfg);
+    let _ = SECURE_TLS_CONFIG.set(cfg.clone());
+    Ok(SECURE_TLS_CONFIG.get().cloned().unwrap_or(cfg))
+}
+
+/// 确保 TLS 配置缓存已初始化，且阻塞的证书加载发生在 `spawn_blocking` 里，
+/// 不占用 tokio 工作线程。
+///
+/// 用 `OnceCell` + 惰性触发：不依赖调用方找到"启动阶段"这个时机——首次
+/// DoT/DoQ 查询会自动触发一次预热并等待完成，之后的查询直接命中缓存，
+/// `build_rustls_client_config` 本身也不会再做阻塞 IO。
+pub async fn ensure_tls_config_ready() {
+    static WARMED: once_cell::sync::OnceCell<()> = once_cell::sync::OnceCell::new();
+    if WARMED.get().is_some() {
+        return;
+    }
+    let _ = tokio::task::spawn_blocking(|| {
+        let _ = build_rustls_client_config(false);
+        let _ = build_rustls_client_config(true);
+    })
+    .await;
+    let _ = WARMED.set(());
 }
 
 /// 跳过证书验证的 Verifier（insecure 模式）。
