@@ -66,6 +66,9 @@ pub struct UpstreamServer {
     dot_pool: Arc<dot::DotPool>,
     doq_pool: Arc<tokio::sync::Mutex<Option<doq::PooledQuicConn>>>,
     doh_client: Arc<tokio::sync::OnceCell<Arc<doh::DohClient>>>,
+    /// 仅 `UpstreamKind::Udp` 使用；`Dhcp` fallback 走一次性的 `udp::query`，
+    /// 不需要池（低频、地址运行时才确定）。
+    udp_pool: Arc<tokio::sync::OnceCell<Arc<udp::UdpPool>>>,
 }
 
 impl std::fmt::Debug for UpstreamServer {
@@ -93,6 +96,7 @@ impl UpstreamServer {
             dot_pool: Arc::new(dot::DotPool::new()),
             doq_pool: Arc::new(tokio::sync::Mutex::new(None)),
             doh_client: Arc::new(tokio::sync::OnceCell::new()),
+            udp_pool: Arc::new(tokio::sync::OnceCell::new()),
         })
     }
 
@@ -107,7 +111,15 @@ impl UpstreamServer {
         };
 
         match &self.kind {
-            UpstreamKind::Udp(addr) => udp::query(*addr, &req).await,
+            UpstreamKind::Udp(addr) => {
+                // 共享 socket + query-id pipelining，替代旧的"每次查询新建
+                // socket"，对齐 sing-box udp.go 的做法（见 udp.rs 注释）。
+                let pool = self
+                    .udp_pool
+                    .get_or_init(|| async { Arc::new(udp::UdpPool::new(*addr)) })
+                    .await;
+                pool.query(&req).await
+            }
             UpstreamKind::Tcp(addr) => tcp::query(*addr, &req).await,
             UpstreamKind::Tls { host, port, insecure } => {
                 dot::query(host, *port, *insecure, &req, &self.dot_pool, &self.resolver).await
