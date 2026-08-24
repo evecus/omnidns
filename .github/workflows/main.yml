@@ -2,6 +2,9 @@ name: test
 
 on:
   workflow_dispatch:
+  push:
+    paths:
+      - 'src/web/**'
 
 permissions:
   contents: write
