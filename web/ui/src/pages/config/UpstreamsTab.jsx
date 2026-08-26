@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { useConfig } from './ConfigContext'
 import { Card, SectionTitle, Button, Input, Select, Toggle } from '../../components/ui'
 import { StringListEditor } from './ListEditor'
@@ -9,17 +9,16 @@ import { StringListEditor } from './ListEditor'
  * 数据模型（前端视图）：
  *   1. 规则集库 rulesetCatalog: [{ name, path }]
  *      - 定义「规则集名称 → .drs 文件路径」
- *      - 名称用于 DNS 规则里下拉选择
+ *      - 名称用于 DNS 规则里勾选，不直接参与匹配
  *   2. DNS 规则 dnsRules: [{ rulesets: string[], upstream: string }]
  *      - 按顺序匹配，首个命中生效
  *      - rulesets 可多选（对应配置文件里一条规则引用多个规则集）
- *      - upstream 从已有上游组里选择
+ *      - upstream 从已有上游组里选择（下拉，不可自由输入）
  *   3. 上游组 groups（不含 default，default 已移到「基础」）
  *
  * 与后端 Config 的映射：
  *   - 保存时把 dnsRules 展开为 rulesets: [{ path, upstream }, ...]
- *   - 加载时从 rulesets[] 反推 catalog + dnsRules（按 upstream 连续分组，
- *     同 upstream 且相邻的多条 path 合并为一条规则的多规则集）
+ *   - 加载时从 rulesets[] 反推 catalog + dnsRules（相邻且同 upstream 的多条 path 合并）
  */
 
 function basenameNoExt(p) {
@@ -31,23 +30,30 @@ function basenameNoExt(p) {
 /** 从后端 rulesets[{path,upstream}] 还原 catalog + 有序 dnsRules */
 function fromBackendRulesets(rulesets = []) {
   const catalogMap = new Map() // name -> path
+  const pathToName = new Map() // path -> name
   const rules = []
 
   for (const entry of rulesets) {
     const path = entry.path || ''
     const upstream = entry.upstream || ''
-    let name = basenameNoExt(path)
-    // 名称冲突时加后缀，保证唯一
-    if (catalogMap.has(name) && catalogMap.get(name) !== path) {
-      let i = 2
-      while (catalogMap.has(`${name}_${i}`)) i += 1
-      name = `${name}_${i}`
+
+    let name = pathToName.get(path)
+    if (!name && path) {
+      name = basenameNoExt(path)
+      if (catalogMap.has(name) && catalogMap.get(name) !== path) {
+        let i = 2
+        while (catalogMap.has(`${name}_${i}`)) i += 1
+        name = `${name}_${i}`
+      }
+      catalogMap.set(name, path)
+      pathToName.set(path, name)
     }
-    if (path) catalogMap.set(name, path)
 
     const last = rules[rules.length - 1]
-    if (last && last.upstream === upstream) {
-      last.rulesets = [...last.rulesets, name]
+    if (last && last.upstream === upstream && name) {
+      if (!last.rulesets.includes(name)) {
+        last.rulesets = [...last.rulesets, name]
+      }
     } else {
       rules.push({ rulesets: name ? [name] : [], upstream })
     }
@@ -74,24 +80,28 @@ function toBackendRulesets(catalog, rules) {
 }
 
 export default function UpstreamsTab() {
-  const { config, updateSection } = useConfig()
+  const { config, updateSection, dirty } = useConfig()
   const groups = config.groups || {}
   const groupNames = Object.keys(groups).filter((n) => n !== 'default')
   const allUpstreamNames = Object.keys(groups) // 含 default，规则里可选保底
 
-  // 从后端 rulesets 派生视图状态；用 key 在配置重载后重置
-  const initial = useMemo(
-    () => fromBackendRulesets(config.rulesets || []),
-    // 仅在 rulesets 引用变化时重算初始值；编辑过程中用本地 state
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [JSON.stringify(config.rulesets || [])],
-  )
-
-  const [catalog, setCatalog] = useState(initial.catalog)
-  const [dnsRules, setDnsRules] = useState(initial.rules)
+  const boot = fromBackendRulesets(config.rulesets || [])
+  const [catalog, setCatalog] = useState(boot.catalog)
+  const [dnsRules, setDnsRules] = useState(boot.rules)
   const [newGroupName, setNewGroupName] = useState('')
   const [newRsName, setNewRsName] = useState('')
   const [newRsPath, setNewRsPath] = useState('')
+
+  // 保存/放弃修改后 config 从服务端重载，同步本地视图
+  const prevDirty = useRef(dirty)
+  useEffect(() => {
+    if (prevDirty.current && !dirty) {
+      const next = fromBackendRulesets(config.rulesets || [])
+      setCatalog(next.catalog)
+      setDnsRules(next.rules)
+    }
+    prevDirty.current = dirty
+  }, [dirty, config.rulesets])
 
   // 同步到 config（保存时走统一 PUT）
   const commitRulesets = (nextCatalog, nextRules) => {
@@ -116,7 +126,6 @@ export default function UpstreamsTab() {
     const next = { ...groups }
     delete next[name]
     updateSection('groups', next)
-    // 清掉引用了该组的规则里的 upstream
     const nextRules = dnsRules.map((r) =>
       r.upstream === name ? { ...r, upstream: '' } : r,
     )
@@ -137,7 +146,6 @@ export default function UpstreamsTab() {
 
   const updateCatalogEntry = (i, patch) => {
     const next = catalog.map((c, idx) => (idx === i ? { ...c, ...patch } : c))
-    // 若改了名称，同步规则里的引用
     let nextRules = dnsRules
     if (patch.name && patch.name !== catalog[i].name) {
       const oldName = catalog[i].name
@@ -152,12 +160,10 @@ export default function UpstreamsTab() {
   const removeCatalogEntry = (i) => {
     const name = catalog[i].name
     const next = catalog.filter((_, idx) => idx !== i)
-    const nextRules = dnsRules
-      .map((r) => ({
-        ...r,
-        rulesets: (r.rulesets || []).filter((n) => n !== name),
-      }))
-      .filter((r) => r.rulesets.length > 0 || r.upstream) // 保留空规则让用户继续填也行
+    const nextRules = dnsRules.map((r) => ({
+      ...r,
+      rulesets: (r.rulesets || []).filter((n) => n !== name),
+    }))
     commitRulesets(next, nextRules)
   }
 
@@ -195,7 +201,7 @@ export default function UpstreamsTab() {
       <div>
         <SectionTitle>规则集</SectionTitle>
         <p className="text-xs text-slate-400 mb-3">
-          先定义规则集名称与对应的 .drs 文件路径。名称供下方 DNS 规则下拉选择，不直接参与匹配。
+          先定义规则集名称与对应的 .drs 文件路径。名称供下方 DNS 规则勾选，不直接参与匹配。
         </p>
 
         <div className="space-y-2 mb-3">
