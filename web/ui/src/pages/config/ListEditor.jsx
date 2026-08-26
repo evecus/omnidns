@@ -2,6 +2,7 @@ import React from 'react'
 import { Input, Button } from '../../components/ui'
 
 // 通用"字符串列表"编辑器（比如 servers、default-nameserver）。
+// 输入框占满剩余宽度，避免移动端被挤成窄条。
 export function StringListEditor({ items = [], onChange, placeholder }) {
   const set = (i, v) => {
     const next = [...items]
@@ -12,16 +13,28 @@ export function StringListEditor({ items = [], onChange, placeholder }) {
   const add = () => onChange([...items, ''])
 
   return (
-    <div className="space-y-2">
+    <div className="space-y-2 w-full">
       {items.map((v, i) => (
-        <div key={i} className="flex gap-2">
-          <Input value={v} onChange={(e) => set(i, e.target.value)} placeholder={placeholder} />
-          <Button variant="ghost" size="sm" onClick={() => remove(i)} className="shrink-0" type="button">
+        <div key={i} className="flex items-center gap-2 w-full min-w-0">
+          <Input
+            value={v}
+            onChange={(e) => set(i, e.target.value)}
+            placeholder={placeholder}
+            className="flex-1 min-w-0 w-full py-2.5"
+          />
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => remove(i)}
+            className="shrink-0 !px-2.5 self-stretch"
+            type="button"
+            aria-label="删除"
+          >
             <TrashIcon />
           </Button>
         </div>
       ))}
-      <Button variant="secondary" size="sm" onClick={add} type="button">
+      <Button variant="secondary" size="sm" onClick={add} type="button" className="w-full sm:w-auto">
         <PlusIcon /> 添加
       </Button>
     </div>
@@ -46,17 +59,33 @@ export function KeyValueEditor({ entries = {}, onChange, keyPlaceholder = 'key',
   }
 
   return (
-    <div className="space-y-2">
+    <div className="space-y-2 w-full">
       {rows.map(([k, v], i) => (
-        <div key={i} className="flex gap-2">
-          <Input value={k} onChange={(e) => setRow(i, e.target.value, v)} placeholder={keyPlaceholder} className="flex-1" />
-          <Input value={v} onChange={(e) => setRow(i, k, e.target.value)} placeholder={valuePlaceholder} className="flex-1" />
-          <Button variant="ghost" size="sm" onClick={() => removeRow(i)} className="shrink-0" type="button">
+        <div key={i} className="flex flex-col sm:flex-row gap-2 w-full min-w-0">
+          <Input
+            value={k}
+            onChange={(e) => setRow(i, e.target.value, v)}
+            placeholder={keyPlaceholder}
+            className="flex-1 min-w-0 py-2.5"
+          />
+          <Input
+            value={v}
+            onChange={(e) => setRow(i, k, e.target.value)}
+            placeholder={valuePlaceholder}
+            className="flex-1 min-w-0 py-2.5"
+          />
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => removeRow(i)}
+            className="shrink-0 self-end sm:self-center"
+            type="button"
+          >
             <TrashIcon />
           </Button>
         </div>
       ))}
-      <Button variant="secondary" size="sm" onClick={addRow} type="button">
+      <Button variant="secondary" size="sm" onClick={addRow} type="button" className="w-full sm:w-auto">
         <PlusIcon /> 添加
       </Button>
     </div>
@@ -87,7 +116,7 @@ export function ObjectListEditor({ items = [], onChange, columns, addLabel = '�
   const desktopGridStyle = { '--obj-list-cols': `repeat(${columns.length}, 1fr) 32px` }
 
   return (
-    <div className="space-y-2">
+    <div className="space-y-2 w-full">
       {/* 桌面端表头，移动端隐藏（卡片布局下每个字段自带 label） */}
       {items.length > 0 && (
         <div className="hidden sm:grid gap-2 px-0.5 obj-list-row" style={desktopGridStyle}>
@@ -99,7 +128,7 @@ export function ObjectListEditor({ items = [], onChange, columns, addLabel = '�
       {items.map((item, i) => (
         <div
           key={i}
-          className="flex flex-col gap-2 p-3 rounded-xl border border-slate-100 sm:border-0 sm:p-0 sm:rounded-none sm:grid sm:gap-2 obj-list-row"
+          className="flex flex-col gap-2 p-3 rounded-xl border border-slate-100 sm:border-0 sm:p-0 sm:rounded-none sm:grid sm:gap-2 obj-list-row w-full min-w-0"
           style={desktopGridStyle}
         >
           {/* 移动端：右上角删除按钮 */}
@@ -109,12 +138,13 @@ export function ObjectListEditor({ items = [], onChange, columns, addLabel = '�
             </Button>
           </div>
           {columns.map((c) => (
-            <div key={c.key} className="sm:contents">
+            <div key={c.key} className="sm:contents min-w-0">
               <label className="text-xs font-medium text-slate-400 mb-1 block sm:hidden">{c.label}</label>
               <Input
                 value={item[c.key] ?? ''}
                 onChange={(e) => setField(i, c.key, e.target.value)}
                 placeholder={c.placeholder}
+                className="w-full min-w-0 py-2.5"
               />
             </div>
           ))}
@@ -124,7 +154,7 @@ export function ObjectListEditor({ items = [], onChange, columns, addLabel = '�
           </Button>
         </div>
       ))}
-      <Button variant="secondary" size="sm" onClick={add} type="button">
+      <Button variant="secondary" size="sm" onClick={add} type="button" className="w-full sm:w-auto">
         <PlusIcon /> {addLabel}
       </Button>
     </div>
