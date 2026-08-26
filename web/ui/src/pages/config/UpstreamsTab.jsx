@@ -238,12 +238,13 @@ export default function UpstreamsTab() {
                   placeholder="cn"
                 />
               </div>
-              <div className="flex-1">
+              <div className="flex-1 min-w-0">
                 <label className="text-xs text-slate-400 mb-1 block sm:hidden">.drs 路径</label>
                 <Input
                   value={c.path}
                   onChange={(e) => updateCatalogEntry(i, { path: e.target.value })}
                   placeholder="/etc/relay/cn.drs"
+                  className="w-full"
                 />
               </div>
               <Button
@@ -273,7 +274,7 @@ export default function UpstreamsTab() {
             value={newRsPath}
             onChange={(e) => setNewRsPath(e.target.value)}
             placeholder=".drs 路径，如 /etc/relay/cn.drs"
-            className="flex-1"
+            className="flex-1 min-w-0"
           />
           <Button size="sm" onClick={addCatalogEntry} type="button" className="shrink-0">
             添加规则集
@@ -313,8 +314,42 @@ export default function UpstreamsTab() {
         <div className="space-y-3">
           {dnsRules.map((rule, i) => (
             <Card key={i} className="!p-4 !shadow-none border-slate-200">
+              {/* 移动端：顶栏序号 + 排序 + 删除；桌面端：左侧排序、右侧删除 */}
+              <div className="flex items-center justify-between gap-2 mb-3 sm:hidden">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-mono text-slate-400 w-6 text-center">{i + 1}</span>
+                  <button
+                    type="button"
+                    className="text-slate-400 hover:text-slate-700 disabled:opacity-30 px-1"
+                    disabled={i === 0}
+                    onClick={() => moveRule(i, -1)}
+                    title="上移"
+                  >
+                    ▲
+                  </button>
+                  <button
+                    type="button"
+                    className="text-slate-400 hover:text-slate-700 disabled:opacity-30 px-1"
+                    disabled={i === dnsRules.length - 1}
+                    onClick={() => moveRule(i, 1)}
+                    title="下移"
+                  >
+                    ▼
+                  </button>
+                </div>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => removeRule(i)}
+                  type="button"
+                  className="text-rose-500"
+                >
+                  删除
+                </Button>
+              </div>
+
               <div className="flex items-start gap-3">
-                <div className="flex flex-col items-center gap-1 shrink-0 pt-1">
+                <div className="hidden sm:flex flex-col items-center gap-1 shrink-0 pt-1">
                   <span className="text-xs font-mono text-slate-400 w-6 text-center">{i + 1}</span>
                   <button
                     type="button"
@@ -336,7 +371,7 @@ export default function UpstreamsTab() {
                   </button>
                 </div>
 
-                <div className="flex-1 space-y-3 min-w-0">
+                <div className="flex-1 space-y-3 min-w-0 w-full">
                   <div>
                     <label className="text-xs font-medium text-slate-500 mb-1.5 block">
                       规则集（可多选）
@@ -376,7 +411,7 @@ export default function UpstreamsTab() {
                   </div>
 
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <div>
+                    <div className="min-w-0">
                       <label className="text-xs font-medium text-slate-500 mb-1 block">
                         负载均衡
                         <span className="font-normal text-slate-400 ml-1">（本条规则共用）</span>
@@ -390,7 +425,7 @@ export default function UpstreamsTab() {
                         <option value="fastest">fastest</option>
                       </Select>
                     </div>
-                    <div>
+                    <div className="min-w-0">
                       <label className="text-xs font-medium text-slate-500 mb-1 block">
                         EDNS Client Subnet
                         <span className="font-normal text-slate-400 ml-1">（本条规则共用）</span>
@@ -401,6 +436,7 @@ export default function UpstreamsTab() {
                           updateRule(i, { clientSubnet: e.target.value || null })
                         }
                         placeholder="1.2.3.0/24"
+                        className="w-full"
                       />
                     </div>
                   </div>
@@ -411,7 +447,7 @@ export default function UpstreamsTab() {
                     label="跳过 TLS 证书验证（本条规则共用，不建议开启）"
                   />
 
-                  <div>
+                  <div className="w-full min-w-0">
                     <label className="text-xs font-medium text-slate-500 mb-1 block">
                       上游 DNS
                     </label>
@@ -428,7 +464,7 @@ export default function UpstreamsTab() {
                   size="sm"
                   onClick={() => removeRule(i)}
                   type="button"
-                  className="text-rose-500 shrink-0"
+                  className="text-rose-500 shrink-0 hidden sm:inline-flex"
                 >
                   删除
                 </Button>
