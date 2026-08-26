@@ -10,6 +10,7 @@ use anyhow::{bail, Result};
 use hickory_proto::op::{Message, MessageType, OpCode, ResponseCode};
 use hickory_proto::rr::{Record, RecordType};
 use indexmap::IndexMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{debug, info};
 
@@ -51,11 +52,21 @@ pub struct Router {
     stats: Option<Arc<StatsCollector>>,
 }
 
+/// 相对路径拼到 base 下；绝对路径原样返回。
+fn resolve_path(base: &Path, path: &Path) -> PathBuf {
+    if path.as_os_str().is_empty() || path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base.join(path)
+    }
+}
+
 impl Router {
     pub fn from_config(
         config: &Config,
         dynamic_hosts: Arc<DynamicHosts>,
         stats: Option<Arc<StatsCollector>>,
+        base_dir: &Path,
     ) -> Result<Self> {
         // 构造 HostResolver（用 default_nameserver 解析上游域名）
         let resolver = HostResolver::new(config.default_nameserver.clone());
@@ -73,14 +84,21 @@ impl Router {
         }
 
         // Load rulesets（每个 entry 是一个 (path, upstream) 对）
+        // 相对路径（./cn.drs、ruleset/cn.drs）相对于 base_dir 解析
         let mut rules = Vec::new();
         for entry in &config.rulesets {
-            let drs = DrsFile::load(&entry.path).map_err(|e| {
-                anyhow::anyhow!("Failed to load ruleset {}: {}", entry.path.display(), e)
+            let path = resolve_path(base_dir, &entry.path);
+            let drs = DrsFile::load(&path).map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to load ruleset {} (resolved from {}): {}",
+                    path.display(),
+                    entry.path.display(),
+                    e
+                )
             })?;
             info!(
                 "Loaded ruleset {} ({} domains, {} suffixes) → upstream {}",
-                entry.path.display(),
+                path.display(),
                 drs.domain_count,
                 drs.suffix_count,
                 entry.upstream
