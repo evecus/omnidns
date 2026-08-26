@@ -6,19 +6,15 @@ import { StringListEditor } from './ListEditor'
 /**
  * 「DNS 规则 / 规则集」页
  *
- * 数据模型（前端视图）：
- *   1. 规则集库 rulesetCatalog: [{ name, path }]
- *      - 定义「规则集名称 → .drs 文件路径」
- *      - 名称用于 DNS 规则里勾选，不直接参与匹配
- *   2. DNS 规则 dnsRules: [{ rulesets: string[], upstream: string }]
- *      - 按顺序匹配，首个命中生效
- *      - rulesets 可多选（对应配置文件里一条规则引用多个规则集）
- *      - upstream 从已有上游组里选择（下拉，不可自由输入）
- *   3. 上游组 groups（不含 default，default 已移到「基础」）
+ * 前端视图：
+ *   1. 规则集库 catalog: [{ name, path }] — 名称供 DNS 规则勾选
+ *   2. DNS 规则 dnsRules: [{ rulesets: string[], servers, strategy, insecure, clientSubnet }]
+ *      - 按顺序匹配；规则集多选；上游 DNS 直接填写，不引用「上游组」
  *
- * 与后端 Config 的映射：
- *   - 保存时把 dnsRules 展开为 rulesets: [{ path, upstream }, ...]
- *   - 加载时从 rulesets[] 反推 catalog + dnsRules（相邻且同 upstream 的多条 path 合并）
+ * 与后端映射（后端仍是 groups + rulesets[{path,upstream}]）：
+ *   - 每条 DNS 规则对应一个隐式 group（以首个规则集名或 rule-N 为名）
+ *   - 保存时：保留 groups.default，其余 groups 由规则重建；rulesets 按顺序展开
+ *   - 加载时：从 rulesets + groups 反推 catalog 与 dnsRules
  */
 
 function basenameNoExt(p) {
@@ -27,10 +23,22 @@ function basenameNoExt(p) {
   return base.replace(/\.drs$/i, '') || base
 }
 
-/** 从后端 rulesets[{path,upstream}] 还原 catalog + 有序 dnsRules */
-function fromBackendRulesets(rulesets = []) {
-  const catalogMap = new Map() // name -> path
-  const pathToName = new Map() // path -> name
+function emptyRule() {
+  return {
+    rulesets: [],
+    servers: [],
+    strategy: 'round_robin',
+    insecure: false,
+    clientSubnet: null,
+  }
+}
+
+/** 从后端 config 还原 catalog + dnsRules */
+function fromBackend(config) {
+  const rulesets = config.rulesets || []
+  const groups = config.groups || {}
+  const catalogMap = new Map()
+  const pathToName = new Map()
   const rules = []
 
   for (const entry of rulesets) {
@@ -49,87 +57,105 @@ function fromBackendRulesets(rulesets = []) {
       pathToName.set(path, name)
     }
 
+    const g = groups[upstream] || {}
     const last = rules[rules.length - 1]
-    if (last && last.upstream === upstream && name) {
-      if (!last.rulesets.includes(name)) {
+    // 相邻且指向同一 upstream 的条目合并为一条规则（多规则集）
+    if (last && last._upstream === upstream) {
+      if (name && !last.rulesets.includes(name)) {
         last.rulesets = [...last.rulesets, name]
       }
     } else {
-      rules.push({ rulesets: name ? [name] : [], upstream })
+      rules.push({
+        rulesets: name ? [name] : [],
+        servers: [...(g.servers || [])],
+        strategy: g.strategy || 'round_robin',
+        insecure: !!g.insecure,
+        clientSubnet: g['client-subnet'] ?? null,
+        _upstream: upstream, // 仅加载期用，保存前会去掉
+      })
     }
   }
 
   const catalog = Array.from(catalogMap.entries()).map(([name, path]) => ({ name, path }))
-  return { catalog, rules }
+  const dnsRules = rules.map(({ _upstream, ...r }) => r)
+  return { catalog, dnsRules }
 }
 
-/** 把 catalog + dnsRules 展开回后端 rulesets[] */
-function toBackendRulesets(catalog, rules) {
-  const pathOf = Object.fromEntries(catalog.map((c) => [c.name, c.path]))
-  const out = []
-  for (const rule of rules) {
-    const names = rule.rulesets?.length ? rule.rulesets : []
-    for (const name of names) {
-      const path = pathOf[name]
-      if (path && rule.upstream) {
-        out.push({ path, upstream: rule.upstream })
-      }
-    }
+/** 为每条规则生成稳定的隐式 group 名 */
+function groupNameForRule(rule, index, used) {
+  const base =
+    (rule.rulesets && rule.rulesets[0] && String(rule.rulesets[0]).trim()) || `rule-${index + 1}`
+  let name = base
+  if (name === 'default') name = `rule-${index + 1}`
+  if (!used.has(name)) {
+    used.add(name)
+    return name
   }
-  return out
+  let i = 2
+  while (used.has(`${base}-${i}`)) i += 1
+  const finalName = `${base}-${i}`
+  used.add(finalName)
+  return finalName
+}
+
+/** 写回 config.groups（保留 default）+ config.rulesets */
+function commitToConfig(config, updateSection, catalog, dnsRules) {
+  const pathOf = Object.fromEntries(catalog.map((c) => [c.name, c.path]))
+  const groups = { ...(config.groups || {}) }
+  const defaultGroup = groups.default || {
+    servers: [],
+    strategy: 'round_robin',
+    insecure: false,
+    'client-subnet': null,
+  }
+
+  // 清掉除 default 以外的旧组，由规则重建
+  const nextGroups = { default: defaultGroup }
+  const nextRulesets = []
+  const usedNames = new Set(['default'])
+
+  dnsRules.forEach((rule, index) => {
+    const gName = groupNameForRule(rule, index, usedNames)
+    nextGroups[gName] = {
+      servers: rule.servers || [],
+      strategy: rule.strategy || 'round_robin',
+      insecure: !!rule.insecure,
+      'client-subnet': rule.clientSubnet || null,
+    }
+    const names = rule.rulesets?.length ? rule.rulesets : []
+    for (const rsName of names) {
+      const path = pathOf[rsName]
+      if (path) nextRulesets.push({ path, upstream: gName })
+    }
+  })
+
+  updateSection('groups', nextGroups)
+  updateSection('rulesets', nextRulesets)
 }
 
 export default function UpstreamsTab() {
   const { config, updateSection, dirty } = useConfig()
-  const groups = config.groups || {}
-  const groupNames = Object.keys(groups).filter((n) => n !== 'default')
-  const allUpstreamNames = Object.keys(groups) // 含 default，规则里可选保底
 
-  const boot = fromBackendRulesets(config.rulesets || [])
+  const boot = fromBackend(config)
   const [catalog, setCatalog] = useState(boot.catalog)
-  const [dnsRules, setDnsRules] = useState(boot.rules)
-  const [newGroupName, setNewGroupName] = useState('')
+  const [dnsRules, setDnsRules] = useState(boot.dnsRules)
   const [newRsName, setNewRsName] = useState('')
   const [newRsPath, setNewRsPath] = useState('')
 
-  // 保存/放弃修改后 config 从服务端重载，同步本地视图
   const prevDirty = useRef(dirty)
   useEffect(() => {
     if (prevDirty.current && !dirty) {
-      const next = fromBackendRulesets(config.rulesets || [])
+      const next = fromBackend(config)
       setCatalog(next.catalog)
-      setDnsRules(next.rules)
+      setDnsRules(next.dnsRules)
     }
     prevDirty.current = dirty
-  }, [dirty, config.rulesets])
+  }, [dirty, config])
 
-  // 同步到 config（保存时走统一 PUT）
-  const commitRulesets = (nextCatalog, nextRules) => {
+  const commit = (nextCatalog, nextRules) => {
     setCatalog(nextCatalog)
     setDnsRules(nextRules)
-    updateSection('rulesets', toBackendRulesets(nextCatalog, nextRules))
-  }
-
-  // ---------- 上游组 ----------
-  const addGroup = () => {
-    const name = newGroupName.trim()
-    if (!name || groups[name]) return
-    updateSection('groups', {
-      ...groups,
-      [name]: { servers: [], strategy: 'round_robin', insecure: false, 'client-subnet': null },
-    })
-    setNewGroupName('')
-  }
-
-  const removeGroup = (name) => {
-    if (name === 'default') return
-    const next = { ...groups }
-    delete next[name]
-    updateSection('groups', next)
-    const nextRules = dnsRules.map((r) =>
-      r.upstream === name ? { ...r, upstream: '' } : r,
-    )
-    commitRulesets(catalog, nextRules)
+    commitToConfig(config, updateSection, nextCatalog, nextRules)
   }
 
   // ---------- 规则集库 ----------
@@ -138,8 +164,7 @@ export default function UpstreamsTab() {
     const path = newRsPath.trim()
     if (!name || !path) return
     if (catalog.some((c) => c.name === name)) return
-    const next = [...catalog, { name, path }]
-    commitRulesets(next, dnsRules)
+    commit([...catalog, { name, path }], dnsRules)
     setNewRsName('')
     setNewRsPath('')
   }
@@ -154,7 +179,7 @@ export default function UpstreamsTab() {
         rulesets: (r.rulesets || []).map((n) => (n === oldName ? patch.name : n)),
       }))
     }
-    commitRulesets(next, nextRules)
+    commit(next, nextRules)
   }
 
   const removeCatalogEntry = (i) => {
@@ -164,44 +189,38 @@ export default function UpstreamsTab() {
       ...r,
       rulesets: (r.rulesets || []).filter((n) => n !== name),
     }))
-    commitRulesets(next, nextRules)
+    commit(next, nextRules)
   }
 
-  // ---------- DNS 规则（有序） ----------
-  const addRule = () => {
-    const next = [...dnsRules, { rulesets: [], upstream: allUpstreamNames[0] || 'default' }]
-    commitRulesets(catalog, next)
-  }
+  // ---------- DNS 规则 ----------
+  const addRule = () => commit(catalog, [...dnsRules, emptyRule()])
 
   const updateRule = (i, patch) => {
-    const next = dnsRules.map((r, idx) => (idx === i ? { ...r, ...patch } : r))
-    commitRulesets(catalog, next)
-  }
-
-  const removeRule = (i) => {
-    commitRulesets(
+    commit(
       catalog,
-      dnsRules.filter((_, idx) => idx !== i),
+      dnsRules.map((r, idx) => (idx === i ? { ...r, ...patch } : r)),
     )
   }
+
+  const removeRule = (i) => commit(catalog, dnsRules.filter((_, idx) => idx !== i))
 
   const moveRule = (i, dir) => {
     const j = i + dir
     if (j < 0 || j >= dnsRules.length) return
     const next = [...dnsRules]
     ;[next[i], next[j]] = [next[j], next[i]]
-    commitRulesets(catalog, next)
+    commit(catalog, next)
   }
 
   const catalogNames = catalog.map((c) => c.name)
 
   return (
     <div className="space-y-8">
-      {/* ===== 1. 规则集库 ===== */}
+      {/* ===== 规则集库 ===== */}
       <div>
         <SectionTitle>规则集</SectionTitle>
         <p className="text-xs text-slate-400 mb-3">
-          先定义规则集名称与对应的 .drs 文件路径。名称供下方 DNS 规则勾选，不直接参与匹配。
+          先登记规则集名称与 .drs 路径。名称仅用于下方 DNS 规则里勾选，不参与实际匹配。
         </p>
 
         <div className="space-y-2 mb-3">
@@ -261,46 +280,7 @@ export default function UpstreamsTab() {
         </div>
       </div>
 
-      {/* ===== 2. 上游组（不含 default） ===== */}
-      <div>
-        <SectionTitle
-          action={
-            <div className="flex gap-2">
-              <Input
-                value={newGroupName}
-                onChange={(e) => setNewGroupName(e.target.value)}
-                placeholder="新上游组名称"
-                className="!w-40"
-              />
-              <Button size="sm" onClick={addGroup} type="button">
-                添加上游组
-              </Button>
-            </div>
-          }
-        >
-          上游组
-        </SectionTitle>
-        <p className="text-xs text-slate-400 mb-4">
-          自定义上游组，供 DNS 规则引用。保底上游（default / nameserver）请在「基础」页配置。
-        </p>
-
-        <div className="space-y-4">
-          {groupNames.length === 0 && (
-            <p className="text-xs text-slate-400">暂无自定义上游组。可添加如 china、ads 等。</p>
-          )}
-          {groupNames.map((name) => (
-            <GroupCard
-              key={name}
-              name={name}
-              group={groups[name]}
-              onChange={(g) => updateSection('groups', { ...groups, [name]: g })}
-              onRemove={() => removeGroup(name)}
-            />
-          ))}
-        </div>
-      </div>
-
-      {/* ===== 3. DNS 规则（有序匹配） ===== */}
+      {/* ===== DNS 规则（有序） ===== */}
       <div>
         <SectionTitle
           action={
@@ -312,8 +292,8 @@ export default function UpstreamsTab() {
           DNS 规则
         </SectionTitle>
         <p className="text-xs text-slate-400 mb-3">
-          按列表顺序匹配，从上到下第一条命中生效；全部未命中则走「基础」里的保底上游。
-          一条规则可勾选多个规则集（相当于配置文件里引用规则集数组）。
+          按列表顺序匹配，第一条命中生效；全部未命中则走「基础」里的保底上游。
+          规则集从上方已登记列表中勾选；上游 DNS 在本条规则内直接填写。
         </p>
 
         <div className="space-y-3">
@@ -381,21 +361,47 @@ export default function UpstreamsTab() {
                     )}
                   </div>
 
-                  <div className="max-w-xs">
-                    <label className="text-xs font-medium text-slate-500 mb-1 block">上游组</label>
-                    <Select
-                      value={rule.upstream || ''}
-                      onChange={(e) => updateRule(i, { upstream: e.target.value })}
-                    >
-                      <option value="" disabled>
-                        选择上游组
-                      </option>
-                      {allUpstreamNames.map((n) => (
-                        <option key={n} value={n}>
-                          {n === 'default' ? 'default（保底 / nameserver）' : n}
-                        </option>
-                      ))}
-                    </Select>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="text-xs font-medium text-slate-500 mb-1 block">负载均衡</label>
+                      <Select
+                        value={rule.strategy || 'round_robin'}
+                        onChange={(e) => updateRule(i, { strategy: e.target.value })}
+                      >
+                        <option value="random">random</option>
+                        <option value="round_robin">round_robin</option>
+                        <option value="fastest">fastest</option>
+                      </Select>
+                    </div>
+                    <div>
+                      <label className="text-xs font-medium text-slate-500 mb-1 block">
+                        EDNS Client Subnet（可选）
+                      </label>
+                      <Input
+                        value={rule.clientSubnet || ''}
+                        onChange={(e) =>
+                          updateRule(i, { clientSubnet: e.target.value || null })
+                        }
+                        placeholder="1.2.3.0/24"
+                      />
+                    </div>
+                  </div>
+
+                  <Toggle
+                    checked={!!rule.insecure}
+                    onChange={(v) => updateRule(i, { insecure: v })}
+                    label="跳过 TLS 证书验证（不建议开启）"
+                  />
+
+                  <div>
+                    <label className="text-xs font-medium text-slate-500 mb-1 block">
+                      上游 DNS
+                    </label>
+                    <StringListEditor
+                      items={rule.servers || []}
+                      onChange={(v) => updateRule(i, { servers: v })}
+                      placeholder="udp://223.5.5.5 或 tls://1.1.1.1"
+                    />
                   </div>
                 </div>
 
@@ -414,69 +420,11 @@ export default function UpstreamsTab() {
 
           {dnsRules.length === 0 && (
             <p className="text-xs text-slate-400 py-2">
-              暂无 DNS 规则。添加后将按顺序匹配规则集并转发到对应上游组。
+              暂无 DNS 规则。添加后按顺序匹配规则集，并使用本条填写的上游 DNS。
             </p>
           )}
         </div>
       </div>
     </div>
-  )
-}
-
-function GroupCard({ name, group, onChange, onRemove }) {
-  return (
-    <Card className="!p-4">
-      <div className="flex items-center justify-between mb-3">
-        <span className="font-semibold text-slate-800 text-sm">{name}</span>
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={onRemove}
-          type="button"
-          className="text-rose-500 hover:bg-rose-50"
-        >
-          删除组
-        </Button>
-      </div>
-
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-3">
-        <div>
-          <label className="text-xs font-medium text-slate-500 mb-1 block">负载均衡策略</label>
-          <Select
-            value={group.strategy || 'round_robin'}
-            onChange={(e) => onChange({ ...group, strategy: e.target.value })}
-          >
-            <option value="random">random</option>
-            <option value="round_robin">round_robin</option>
-            <option value="fastest">fastest</option>
-          </Select>
-        </div>
-        <div>
-          <label className="text-xs font-medium text-slate-500 mb-1 block">EDNS Client Subnet（可选）</label>
-          <Input
-            value={group['client-subnet'] || ''}
-            onChange={(e) => onChange({ ...group, 'client-subnet': e.target.value || null })}
-            placeholder="1.2.3.0/24"
-          />
-        </div>
-      </div>
-
-      <div className="mb-3">
-        <Toggle
-          checked={!!group.insecure}
-          onChange={(v) => onChange({ ...group, insecure: v })}
-          label="跳过 TLS 证书验证（DoT/DoH/DoQ，不建议开启）"
-        />
-      </div>
-
-      <div>
-        <label className="text-xs font-medium text-slate-500 mb-1 block">服务器列表</label>
-        <StringListEditor
-          items={group.servers || []}
-          onChange={(v) => onChange({ ...group, servers: v })}
-          placeholder="tls://1.1.1.1 或 rcode://refused"
-        />
-      </div>
-    </Card>
   )
 }
