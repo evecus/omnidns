@@ -216,7 +216,8 @@ fn join_multicast_group(socket: &UdpSocket, iface: &str) -> Result<()> {
     let group: Ipv6Addr = "ff02::1:2".parse().unwrap();
     let mreq = libc::ipv6_mreq {
         ipv6mr_multiaddr: libc::in6_addr { s6_addr: group.octets() },
-        ipv6mr_interface: idx as u32,
+        // Android (bionic): i32; Linux (glibc/musl): u32 — let type inference pick the right one
+        ipv6mr_interface: idx as _,
     };
     let ret = unsafe {
         libc::setsockopt(

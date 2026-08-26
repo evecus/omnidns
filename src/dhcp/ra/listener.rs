@@ -124,8 +124,8 @@ fn bind_to_device_v6_fd(fd: libc::c_int, iface: &str) -> Result<()> {
             fd,
             libc::IPPROTO_IPV6,
             libc::IPV6_MULTICAST_IF,
-            &(idx as u32) as *const _ as *const libc::c_void,
-            std::mem::size_of::<u32>() as libc::socklen_t,
+            &idx as *const _ as *const libc::c_void,
+            std::mem::size_of_val(&idx) as libc::socklen_t,
         )
     };
     if ret != 0 {
@@ -139,7 +139,8 @@ fn join_multicast_v6_fd(fd: libc::c_int, iface: &str, group: &str) -> Result<()>
     let group: Ipv6Addr = group.parse()?;
     let mreq = libc::ipv6_mreq {
         ipv6mr_multiaddr: libc::in6_addr { s6_addr: group.octets() },
-        ipv6mr_interface: idx as u32,
+        // Android (bionic): i32; Linux (glibc/musl): u32 — let type inference pick the right one
+        ipv6mr_interface: idx as _,
     };
     let ret = unsafe {
         libc::setsockopt(
