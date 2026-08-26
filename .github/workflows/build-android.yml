@@ -1,0 +1,94 @@
+name: Build Android arm64
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+env:
+  BINARY_NAME: relay
+  CARGO_TERM_COLOR: always
+  NDK_VERSION: r27c          # LTS, 对应 Android NDK 27
+  ANDROID_API: "24"          # 最低 API Level，可按需调整
+
+jobs:
+  build:
+    name: Build aarch64-linux-android
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-registry-
+
+      - name: Cache build artifacts
+        uses: actions/cache@v4
+        with:
+          path: target/
+          key: build-android-arm64-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: build-android-arm64-
+
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: ${{ env.NDK_VERSION }}
+          link-to-sdk: true
+
+      - name: Install cargo-ndk
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk
+
+      - name: Build
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          # cargo-ndk 会自动设置正确的 linker / sysroot / API level
+          cargo ndk \
+            --target arm64-v8a \
+            --platform ${{ env.ANDROID_API }} \
+            build --release --bin relay
+
+      - name: Rename binary
+        run: |
+          # cargo-ndk 把产物放在 target/aarch64-linux-android/release/
+          cp target/aarch64-linux-android/release/relay \
+             ${{ env.BINARY_NAME }}-android-arm64
+          # 可选：用 NDK 的 strip 再瘦一点
+          ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip \
+            ${{ env.BINARY_NAME }}-android-arm64 || true
+          ls -lh ${{ env.BINARY_NAME }}-android-arm64
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: relay-android-arm64
+          path: ${{ env.BINARY_NAME }}-android-arm64
+          if-no-files-found: error
+
+      # 打 tag 时自动发 Release（与现有 main.yml 风格保持一致）
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.BINARY_NAME }}-android-arm64
+          generate_release_notes: true
