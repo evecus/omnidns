@@ -8,13 +8,14 @@ import { StringListEditor } from './ListEditor'
  *
  * 前端视图：
  *   1. 规则集库 catalog: [{ name, path }] — 名称供 DNS 规则勾选
- *   2. DNS 规则 dnsRules: [{ rulesets: string[], servers, strategy, insecure, clientSubnet }]
- *      - 按顺序匹配；规则集多选；上游 DNS 直接填写，不引用「上游组」
+ *   2. DNS 规则 dnsRules: [{ rulesets, servers, strategy, insecure, clientSubnet }]
+ *      - 按顺序匹配；规则集多选；上游 DNS 直接填写
+ *      - strategy / ECS / insecure 作用在「本条规则」对应的隐式上游组上，
+ *        组内所有服务器共用，不能按单个 URL 单独配置（与后端一致）
  *
- * 与后端映射（后端仍是 groups + rulesets[{path,upstream}]）：
- *   - 每条 DNS 规则对应一个隐式 group（以首个规则集名或 rule-N 为名）
- *   - 保存时：保留 groups.default，其余 groups 由规则重建；rulesets 按顺序展开
- *   - 加载时：从 rulesets + groups 反推 catalog 与 dnsRules
+ * 与后端映射：
+ *   - 每条 DNS 规则 → 一个隐式 group（名取自首个规则集名或 rule-N）
+ *   - 保存时保留 groups.default，其余由规则重建；rulesets 按顺序展开
  */
 
 function basenameNoExt(p) {
@@ -33,7 +34,6 @@ function emptyRule() {
   }
 }
 
-/** 从后端 config 还原 catalog + dnsRules */
 function fromBackend(config) {
   const rulesets = config.rulesets || []
   const groups = config.groups || {}
@@ -59,7 +59,6 @@ function fromBackend(config) {
 
     const g = groups[upstream] || {}
     const last = rules[rules.length - 1]
-    // 相邻且指向同一 upstream 的条目合并为一条规则（多规则集）
     if (last && last._upstream === upstream) {
       if (name && !last.rulesets.includes(name)) {
         last.rulesets = [...last.rulesets, name]
@@ -71,7 +70,7 @@ function fromBackend(config) {
         strategy: g.strategy || 'round_robin',
         insecure: !!g.insecure,
         clientSubnet: g['client-subnet'] ?? null,
-        _upstream: upstream, // 仅加载期用，保存前会去掉
+        _upstream: upstream,
       })
     }
   }
@@ -81,7 +80,6 @@ function fromBackend(config) {
   return { catalog, dnsRules }
 }
 
-/** 为每条规则生成稳定的隐式 group 名 */
 function groupNameForRule(rule, index, used) {
   const base =
     (rule.rulesets && rule.rulesets[0] && String(rule.rulesets[0]).trim()) || `rule-${index + 1}`
@@ -98,7 +96,6 @@ function groupNameForRule(rule, index, used) {
   return finalName
 }
 
-/** 写回 config.groups（保留 default）+ config.rulesets */
 function commitToConfig(config, updateSection, catalog, dnsRules) {
   const pathOf = Object.fromEntries(catalog.map((c) => [c.name, c.path]))
   const groups = { ...(config.groups || {}) }
@@ -109,7 +106,6 @@ function commitToConfig(config, updateSection, catalog, dnsRules) {
     'client-subnet': null,
   }
 
-  // 清掉除 default 以外的旧组，由规则重建
   const nextGroups = { default: defaultGroup }
   const nextRulesets = []
   const usedNames = new Set(['default'])
@@ -158,7 +154,6 @@ export default function UpstreamsTab() {
     commitToConfig(config, updateSection, nextCatalog, nextRules)
   }
 
-  // ---------- 规则集库 ----------
   const addCatalogEntry = () => {
     const name = newRsName.trim()
     const path = newRsPath.trim()
@@ -192,7 +187,6 @@ export default function UpstreamsTab() {
     commit(next, nextRules)
   }
 
-  // ---------- DNS 规则 ----------
   const addRule = () => commit(catalog, [...dnsRules, emptyRule()])
 
   const updateRule = (i, patch) => {
@@ -215,22 +209,29 @@ export default function UpstreamsTab() {
   const catalogNames = catalog.map((c) => c.name)
 
   return (
-    <div className="space-y-8">
+    <div className="space-y-6">
       {/* ===== 规则集库 ===== */}
-      <div>
-        <SectionTitle>规则集</SectionTitle>
-        <p className="text-xs text-slate-400 mb-3">
-          先登记规则集名称与 .drs 路径。名称仅用于下方 DNS 规则里勾选，不参与实际匹配。
-        </p>
+      <section className="rounded-2xl border border-slate-200 bg-slate-50/60 p-4 sm:p-5">
+        <div className="flex items-start gap-3 mb-4">
+          <span className="inline-flex items-center justify-center w-7 h-7 rounded-lg bg-slate-200 text-slate-600 text-xs font-bold shrink-0">
+            1
+          </span>
+          <div className="min-w-0">
+            <SectionTitle>规则集</SectionTitle>
+            <p className="text-xs text-slate-500 mt-0.5">
+              登记「名称 → .drs 文件」。这里只做资源库，不决定匹配顺序；名称供下方 DNS 规则勾选。
+            </p>
+          </div>
+        </div>
 
         <div className="space-y-2 mb-3">
           {catalog.map((c, i) => (
             <div
               key={i}
-              className="flex flex-col sm:flex-row gap-2 p-3 rounded-xl border border-slate-100 sm:border-0 sm:p-0"
+              className="flex flex-col sm:flex-row gap-2 p-3 rounded-xl border border-slate-200 bg-white"
             >
               <div className="sm:w-40">
-                <label className="text-xs text-slate-400 sm:hidden">名称</label>
+                <label className="text-xs text-slate-400 mb-1 block sm:hidden">名称</label>
                 <Input
                   value={c.name}
                   onChange={(e) => updateCatalogEntry(i, { name: e.target.value })}
@@ -238,7 +239,7 @@ export default function UpstreamsTab() {
                 />
               </div>
               <div className="flex-1">
-                <label className="text-xs text-slate-400 sm:hidden">.drs 路径</label>
+                <label className="text-xs text-slate-400 mb-1 block sm:hidden">.drs 路径</label>
                 <Input
                   value={c.path}
                   onChange={(e) => updateCatalogEntry(i, { path: e.target.value })}
@@ -257,7 +258,7 @@ export default function UpstreamsTab() {
             </div>
           ))}
           {catalog.length === 0 && (
-            <p className="text-xs text-slate-400 py-2">尚未添加规则集。先添加名称和 .drs 路径。</p>
+            <p className="text-xs text-slate-400 py-2 px-1">尚未添加规则集。先添加名称和 .drs 路径。</p>
           )}
         </div>
 
@@ -278,27 +279,40 @@ export default function UpstreamsTab() {
             添加规则集
           </Button>
         </div>
+      </section>
+
+      {/* 分隔说明 */}
+      <div className="flex items-center gap-3 px-1">
+        <div className="flex-1 h-px bg-slate-200" />
+        <span className="text-[11px] font-medium text-slate-400 uppercase tracking-wider">
+          匹配顺序在下方配置
+        </span>
+        <div className="flex-1 h-px bg-slate-200" />
       </div>
 
-      {/* ===== DNS 规则（有序） ===== */}
-      <div>
-        <SectionTitle
-          action={
-            <Button size="sm" onClick={addRule} type="button" disabled={catalogNames.length === 0}>
-              添加规则
-            </Button>
-          }
-        >
-          DNS 规则
-        </SectionTitle>
-        <p className="text-xs text-slate-400 mb-3">
-          按列表顺序匹配，第一条命中生效；全部未命中则走「基础」里的保底上游。
-          规则集从上方已登记列表中勾选；上游 DNS 在本条规则内直接填写。
-        </p>
+      {/* ===== DNS 规则 ===== */}
+      <section className="rounded-2xl border border-brand-100 bg-brand-50/30 p-4 sm:p-5">
+        <div className="flex items-start justify-between gap-3 mb-4 flex-wrap">
+          <div className="flex items-start gap-3 min-w-0">
+            <span className="inline-flex items-center justify-center w-7 h-7 rounded-lg bg-brand-100 text-brand-700 text-xs font-bold shrink-0">
+              2
+            </span>
+            <div className="min-w-0">
+              <SectionTitle>DNS 规则</SectionTitle>
+              <p className="text-xs text-slate-500 mt-0.5">
+                按列表顺序匹配，第一条命中生效；全部未命中走「基础」里的保底上游。
+                规则集从上方勾选；上游 DNS 在本条内直接填写。
+              </p>
+            </div>
+          </div>
+          <Button size="sm" onClick={addRule} type="button" disabled={catalogNames.length === 0}>
+            添加规则
+          </Button>
+        </div>
 
         <div className="space-y-3">
           {dnsRules.map((rule, i) => (
-            <Card key={i} className="!p-4">
+            <Card key={i} className="!p-4 !shadow-none border-slate-200">
               <div className="flex items-start gap-3">
                 <div className="flex flex-col items-center gap-1 shrink-0 pt-1">
                   <span className="text-xs font-mono text-slate-400 w-6 text-center">{i + 1}</span>
@@ -363,7 +377,10 @@ export default function UpstreamsTab() {
 
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <div>
-                      <label className="text-xs font-medium text-slate-500 mb-1 block">负载均衡</label>
+                      <label className="text-xs font-medium text-slate-500 mb-1 block">
+                        负载均衡
+                        <span className="font-normal text-slate-400 ml-1">（本条规则共用）</span>
+                      </label>
                       <Select
                         value={rule.strategy || 'round_robin'}
                         onChange={(e) => updateRule(i, { strategy: e.target.value })}
@@ -375,7 +392,8 @@ export default function UpstreamsTab() {
                     </div>
                     <div>
                       <label className="text-xs font-medium text-slate-500 mb-1 block">
-                        EDNS Client Subnet（可选）
+                        EDNS Client Subnet
+                        <span className="font-normal text-slate-400 ml-1">（本条规则共用）</span>
                       </label>
                       <Input
                         value={rule.clientSubnet || ''}
@@ -390,7 +408,7 @@ export default function UpstreamsTab() {
                   <Toggle
                     checked={!!rule.insecure}
                     onChange={(v) => updateRule(i, { insecure: v })}
-                    label="跳过 TLS 证书验证（不建议开启）"
+                    label="跳过 TLS 证书验证（本条规则共用，不建议开启）"
                   />
 
                   <div>
@@ -419,12 +437,12 @@ export default function UpstreamsTab() {
           ))}
 
           {dnsRules.length === 0 && (
-            <p className="text-xs text-slate-400 py-2">
+            <p className="text-xs text-slate-400 py-2 px-1">
               暂无 DNS 规则。添加后按顺序匹配规则集，并使用本条填写的上游 DNS。
             </p>
           )}
         </div>
-      </div>
+      </section>
     </div>
   )
 }
