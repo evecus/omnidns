@@ -96,11 +96,21 @@ export default function Layout() {
   )
 }
 
-function Logo() {
+/** 与浏览器标签页 favicon.svg 同一套盾形图标 */
+function Logo({ className = 'w-8 h-8' }) {
   return (
-    <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-brand-500 to-brand-700 flex items-center justify-center text-white font-bold text-sm shadow-sm">
-      R
-    </div>
+    <img
+      src="${import.meta.env.BASE_URL}favicon.svg".replace(
+        '${import.meta.env.BASE_URL}',
+        // Vite 会在构建时处理 /favicon.svg；开发与生产均从站点根路径提供
+        '/',
+      )}
+      alt="Relay"
+      className={`${className} shrink-0 rounded-lg shadow-sm`}
+      width={32}
+      height={32}
+      draggable={false}
+    />
   )
 }
 
