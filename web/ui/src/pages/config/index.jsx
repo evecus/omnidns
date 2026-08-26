@@ -11,7 +11,7 @@ import WebTab from './WebTab'
 
 const TABS = [
   { key: 'basic', label: '基础', component: BasicTab },
-  { key: 'upstreams', label: '上游 / 规则', component: UpstreamsTab },
+  { key: 'upstreams', label: 'DNS规则 / 规则集', component: UpstreamsTab },
   { key: 'hosts', label: 'Hosts', component: HostsTab },
   { key: 'cache', label: '缓存', component: CacheTab },
   { key: 'firewall', label: '防火墙', component: FirewallTab },

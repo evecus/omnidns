@@ -1,10 +1,21 @@
 import React from 'react'
 import { useConfig } from './ConfigContext'
-import { FormRow, Input, Select, Toggle } from '../../components/ui'
+import { FormRow, Input, Select, Toggle, SectionTitle, Card } from '../../components/ui'
 import { StringListEditor } from './ListEditor'
 
 export default function BasicTab() {
-  const { config, update } = useConfig()
+  const { config, update, updateSection } = useConfig()
+  const groups = config.groups || {}
+  const defaultGroup = groups.default || {
+    servers: [],
+    strategy: 'round_robin',
+    insecure: false,
+    'client-subnet': null,
+  }
+
+  const setDefaultGroup = (g) => {
+    updateSection('groups', { ...groups, default: g })
+  }
 
   return (
     <div className="divide-y divide-slate-50">
@@ -43,6 +54,55 @@ export default function BasicTab() {
           placeholder="1.1.1.1 或 1.1.1.1:53"
         />
       </FormRow>
+
+      {/* nameserver / default 组：保底上游，放在「上游域名解析 DNS」下面 */}
+      <div className="py-4">
+        <SectionTitle>保底上游（nameserver）</SectionTitle>
+        <p className="text-xs text-slate-400 mb-3">
+          对应配置文件的 nameserver，即 default 组。所有 DNS 规则都未命中时走这里。
+          支持 udp:// tcp:// tls:// https:// quic:// dhcp:// rcode:// 前缀。
+        </p>
+        <Card className="!p-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-3">
+            <div>
+              <label className="text-xs font-medium text-slate-500 mb-1 block">负载均衡策略</label>
+              <Select
+                value={defaultGroup.strategy || 'round_robin'}
+                onChange={(e) => setDefaultGroup({ ...defaultGroup, strategy: e.target.value })}
+              >
+                <option value="random">random</option>
+                <option value="round_robin">round_robin</option>
+                <option value="fastest">fastest</option>
+              </Select>
+            </div>
+            <div>
+              <label className="text-xs font-medium text-slate-500 mb-1 block">EDNS Client Subnet（可选）</label>
+              <Input
+                value={defaultGroup['client-subnet'] || ''}
+                onChange={(e) =>
+                  setDefaultGroup({ ...defaultGroup, 'client-subnet': e.target.value || null })
+                }
+                placeholder="1.2.3.0/24"
+              />
+            </div>
+          </div>
+          <div className="mb-3">
+            <Toggle
+              checked={!!defaultGroup.insecure}
+              onChange={(v) => setDefaultGroup({ ...defaultGroup, insecure: v })}
+              label="跳过 TLS 证书验证（DoT/DoH/DoQ，不建议开启）"
+            />
+          </div>
+          <div>
+            <label className="text-xs font-medium text-slate-500 mb-1 block">服务器列表</label>
+            <StringListEditor
+              items={defaultGroup.servers || []}
+              onChange={(v) => setDefaultGroup({ ...defaultGroup, servers: v })}
+              placeholder="tls://1.1.1.1 或 rcode://refused"
+            />
+          </div>
+        </Card>
+      </div>
     </div>
   )
 }
