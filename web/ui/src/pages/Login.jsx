@@ -32,9 +32,14 @@ export default function Login() {
     <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-slate-50 via-white to-brand-50 px-4">
       <div className="w-full max-w-sm animate-slide-up">
         <div className="flex flex-col items-center mb-8">
-          <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-brand-500 to-brand-700 flex items-center justify-center text-white font-bold text-2xl shadow-lg shadow-brand-500/20 mb-4">
-            R
-          </div>
+          <img
+            src="/favicon.svg"
+            alt="Relay"
+            className="w-14 h-14 rounded-2xl shadow-lg shadow-brand-500/20 mb-4"
+            width={56}
+            height={56}
+            draggable={false}
+          />
           <h1 className="text-xl font-bold text-slate-800">Relay 管理面板</h1>
           <p className="text-sm text-slate-500 mt-1">登录以继续</p>
         </div>

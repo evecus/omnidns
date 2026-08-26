@@ -100,11 +100,7 @@ export default function Layout() {
 function Logo({ className = 'w-8 h-8' }) {
   return (
     <img
-      src="${import.meta.env.BASE_URL}favicon.svg".replace(
-        '${import.meta.env.BASE_URL}',
-        // Vite 会在构建时处理 /favicon.svg；开发与生产均从站点根路径提供
-        '/',
-      )}
+      src="/favicon.svg"
       alt="Relay"
       className={`${className} shrink-0 rounded-lg shadow-sm`}
       width={32}
