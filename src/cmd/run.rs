@@ -19,18 +19,39 @@ const FLUSH_INTERVAL: Duration = Duration::from_secs(30);
 pub struct RunArgs {
     /// 配置文件路径。若不存在，会自动生成一份空配置（DNS 部分未配置，
     /// 但 web 管理面板会正常启动，可在面板里完成配置）。
-    #[arg(short, long, default_value = "/etc/relay/config.yaml")]
-    pub config: PathBuf,
+    /// 与 --data-dir 同时指定时以本参数为准。
+    #[arg(short, long)]
+    pub config: Option<PathBuf>,
+
+    /// 数据目录。默认使用该目录下的 config.yaml 作为配置文件（不存在则自动生成）。
+    /// 配置中的相对路径（如规则集 ./cn.drs、./ruleset/cn.drs）均相对于此目录解析。
+    /// 未指定时，相对路径相对于配置文件所在目录。
+    #[arg(short = 'd', long = "data-dir")]
+    pub data_dir: Option<PathBuf>,
 }
 
 pub async fn run(args: RunArgs) -> Result<()> {
-    let config = Config::load_or_init(&args.config)
-        .with_context(|| format!("Failed to load config from {}", args.config.display()))?;
+    let (config_path, base_dir) = resolve_paths(&args)?;
+
+    // 确保数据目录存在（-d 场景下便于直接往里放 .drs）
+    if let Some(ref d) = args.data_dir {
+        std::fs::create_dir_all(d)
+            .with_context(|| format!("Failed to create data dir {}", d.display()))?;
+    } else if let Some(parent) = config_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+    }
+
+    let config = Config::load_or_init(&config_path)
+        .with_context(|| format!("Failed to load config from {}", config_path.display()))?;
 
     // 根据配置文件 log-level 重新初始化日志（环境变量 RUST_LOG 优先）。
     crate::init_logging(config.log_level);
 
     info!("Starting relay on {}", config.listen);
+    info!("Config: {}", config_path.display());
+    info!("Base dir (relative paths): {}", base_dir.display());
 
     // Warn if plain UDP upstreams are used with firewall redirect
     if config.firewall.as_ref().map(|f| f.enable).unwrap_or(false) {
@@ -55,7 +76,8 @@ pub async fn run(args: RunArgs) -> Result<()> {
     let persistence = if config.web.sqlite_path.as_os_str().is_empty() {
         None
     } else {
-        match StatsPersistence::open(&config.web.sqlite_path, QUERY_LOG_RETENTION_SECS) {
+        let sqlite_path = resolve_under(&base_dir, &config.web.sqlite_path);
+        match StatsPersistence::open(&sqlite_path, QUERY_LOG_RETENTION_SECS) {
             Ok(p) => {
                 let totals = p.load_totals();
                 info!(
@@ -74,7 +96,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
             }
             Err(e) => {
                 warn!("Failed to open SQLite {}: {}. Stats will not persist.",
-                      config.web.sqlite_path.display(), e);
+                      sqlite_path.display(), e);
                 None
             }
         }
@@ -90,9 +112,14 @@ pub async fn run(args: RunArgs) -> Result<()> {
 
     // 构建运行时句柄：绑定 DNS 监听、安装防火墙（若启用）、启动 DHCP/RA。
     // 之后所有配置变更（含来自 web 面板的热更新）都通过它完成。
-    let runtime = RuntimeHandle::start(args.config.clone(), config.clone(), stats_collector.clone())
-        .await
-        .context("Failed to start runtime (DNS/firewall/DHCP)")?;
+    let runtime = RuntimeHandle::start(
+        config_path.clone(),
+        base_dir.clone(),
+        config.clone(),
+        stats_collector.clone(),
+    )
+    .await
+    .context("Failed to start runtime (DNS/firewall/DHCP)")?;
 
     // Shutdown channel
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -131,6 +158,57 @@ pub async fn run(args: RunArgs) -> Result<()> {
 
     info!("Shutting down...");
     Ok(())
+}
+
+/// 解析配置文件路径与相对路径基准目录。
+///
+/// - `-d /path`           → config=/path/config.yaml，base=/path
+/// - `-c /a/b.yaml`       → config=/a/b.yaml，base=/a
+/// - `-d /path -c x.yaml` → config=x.yaml（或绝对路径），base=/path
+/// - 都未指定             → config=/etc/relay/config.yaml，base=/etc/relay
+fn resolve_paths(args: &RunArgs) -> Result<(PathBuf, PathBuf)> {
+    let config_path = if let Some(ref c) = args.config {
+        c.clone()
+    } else if let Some(ref d) = args.data_dir {
+        d.join("config.yaml")
+    } else {
+        PathBuf::from("/etc/relay/config.yaml")
+    };
+
+    let base_dir = if let Some(ref d) = args.data_dir {
+        d.clone()
+    } else if let Some(parent) = config_path.parent() {
+        if parent.as_os_str().is_empty() {
+            PathBuf::from(".")
+        } else {
+            parent.to_path_buf()
+        }
+    } else {
+        PathBuf::from(".")
+    };
+
+    // 尽量转成绝对路径，避免进程 cwd 变化影响相对路径解析
+    let base_dir = if base_dir.is_absolute() {
+        base_dir
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(&base_dir)
+    };
+
+    Ok((config_path, base_dir))
+}
+
+/// 若 path 为相对路径，则拼到 base 下；绝对路径原样返回。
+pub fn resolve_under(base: &std::path::Path, path: &std::path::Path) -> PathBuf {
+    if path.as_os_str().is_empty() {
+        return path.to_path_buf();
+    }
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base.join(path)
+    }
 }
 
 /// 后台 worker：消费 QueryEntry channel，批量写入 SQLite。

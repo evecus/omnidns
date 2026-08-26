@@ -16,6 +16,7 @@
 //!   - `web.listen` 与 `web.auth.{username,password_hash}`（密码单独走改密码接口）
 //!     不在这里处理：apply() 中会强制沿用旧值并记录进 `ignored`，
 //!     必须手动改配置文件+重启进程才生效，UI 侧标注为只读。
+//!   - `base_dir`：配置中相对路径（规则集等）的解析基准，来自 `-d` 或配置文件所在目录。
 
 use anyhow::{Context, Result};
 use arc_swap::ArcSwap;
@@ -43,6 +44,8 @@ pub struct ApplyReport {
 
 pub struct RuntimeHandle {
     pub config_path: PathBuf,
+    /// 相对路径基准目录（-d 或配置文件父目录）
+    pub base_dir: PathBuf,
     pub config: ArcSwap<Config>,
     pub router: ArcSwap<Router>,
     pub dynamic_hosts: ArcSwap<DynamicHosts>,
@@ -58,13 +61,14 @@ impl RuntimeHandle {
     /// 返回持有一切句柄的 RuntimeHandle。
     pub async fn start(
         config_path: PathBuf,
+        base_dir: PathBuf,
         config: Config,
         stats: Arc<StatsCollector>,
     ) -> Result<Arc<Self>> {
         let dynamic_hosts = Arc::new(DynamicHosts::new(dhcp_domain_of(&config.dhcp)));
 
         let router = Arc::new(
-            Router::from_config(&config, dynamic_hosts.clone(), Some(stats.clone()))
+            Router::from_config(&config, dynamic_hosts.clone(), Some(stats.clone()), &base_dir)
                 .context("Failed to build initial DNS router")?,
         );
 
@@ -88,6 +92,7 @@ impl RuntimeHandle {
 
         let handle = Arc::new(RuntimeHandle {
             config_path,
+            base_dir,
             config: ArcSwap::from_pointee(config.clone()),
             router: ArcSwap::from(router),
             dynamic_hosts: ArcSwap::from(dynamic_hosts),
@@ -142,8 +147,13 @@ impl RuntimeHandle {
 
         if dns_routing_changed || dhcp_domain_changed {
             let dynamic_hosts = self.dynamic_hosts.load_full();
-            let new_router = Router::from_config(&new_config, dynamic_hosts, Some(self.stats.clone()))
-                .context("Failed to build new DNS router")?;
+            let new_router = Router::from_config(
+                &new_config,
+                dynamic_hosts,
+                Some(self.stats.clone()),
+                &self.base_dir,
+            )
+            .context("Failed to build new DNS router")?;
             self.router.store(Arc::new(new_router));
             report.applied.push("dns-routing".to_string());
         }
